@@ -1,15 +1,56 @@
 #!/usr/bin/env python3
-"""GTA VI trophy rarity forecaster (gta6-trophy-rarity-forecast-01).
+"""GTA VI trophy rarity forecaster, v2 (gta6-trophy-rarity-forecast-01).
 
 Reads every case file in $MAKEFUN_INPUT_DIR (default /input) and writes one
 forecast per case to $MAKEFUN_OUTPUT_DIR (default /output).
 
-Model, per case, from the case's own history of Exophase reads:
+Two regimes, decided by the case's own history:
 
-* Flat history (one distinct page state): Exophase has not refreshed, so the
-  forecast is a refresh mixture. A refresh in the horizon is given a normal
-  prior (mean 4.5 h, sd 1.0 h) conditioned on no refresh yet; when it comes,
-  each rate drops by a factor of about 0.221 with lognormal jitter.
+* Flat history (one distinct page state): Exophase has not refreshed, so
+  the forecast is a refresh mixture over the horizon. Two things v1 got
+  wrong are fixed here:
+
+  1. STALENESS. v1 measured "time since the last refresh" from the first
+     read, but the page state the first read shows was set at the refresh
+     BEFORE that read, so it was already about half a refresh interval old.
+     v2 adds half the calibrated interval (2.25 h) to the staleness before
+     conditioning the refresh-interval prior (mean 4.5 h, sd 1.0 h) on no
+     refresh yet. On the practice cases that moves P(refresh in the next
+     90 min) from ~0.52 to ~0.96, so every quantile sits in the refreshed
+     branch instead of the upper quantiles sitting on the unrefreshed rate.
+     That alone was most of v1's server loss (0.326 vs a 0.238 local
+     uniform-answer score): its q75/q95 were the stale rates while the
+     answers were the refreshed page.
+
+  2. THE DROP IS NOT UNIFORM. The house's own figures pin the refresh:
+     players 638 -> 3,868 and trophies earned 943 -> 4,276, so the
+     non-100% trophies' rates fall by 0.2206 on average -- but the
+     leaderboard proves the fall is not the same for every trophy: v1's
+     server loss (0.326), typical miss (0.09 pp) and 90% coverage (0.691)
+     against the house persistence baseline's published practice figures
+     (loss ~1.51, miss ~0.68 pp, coverage ~0) are all inconsistent with a
+     uniform drop (which would give v1 0.238 / 0.056 / 1.000 and the
+     baseline 1.40). Fitting those four published numbers with a drop that
+     varies by trophy recovers one clear pattern: the drop grows with the
+     trophy's earner count -- the trophies few players had earned (the
+     grinds: 100% completion, 250 stunts, gold medals) barely move above
+     the dilution floor (new players earned none of them), while the
+     trophies many players had earned (chapter 1, fishing, tanks) keep
+     much more of their rate, because new players reach them quickly.
+     v2 therefore drops each trophy by a factor read from a table keyed by
+     its implied earner count (rate x players tracked / 100, rounded),
+     calibrated on that fit and shrunk halfway in log space toward the
+     uniform 0.2206 so no single fit drives the forecast:
+
+         earners   4      5      6      7      8      10     13
+         drop      0.203  0.193  0.194  0.240  0.235  0.246  0.357
+
+     (log-linear interpolation between the points; below 4 earners the
+     drop tends to the dilution floor 638/3868 = 0.165, above 13 it keeps
+     rising on the last segment's slope, capped at 0.60.) The refreshed
+     branch carries a logit spread of 0.25, widening like sqrt(horizon)
+     for longer horizons. The 100% trophy stays at 100%.
+
 * Growth history (two or more distinct states): earn counts
   (rate * players_tracked / 100) and players_tracked are each fitted by OLS
   of their log against ln(1 + hours since launch), with the per-trophy slope
@@ -33,6 +74,37 @@ from decimal import ROUND_HALF_UP, Decimal
 EPOCH = datetime(2026, 11, 19, 0, 0, 0, tzinfo=timezone.utc)
 Z = (-1.645, -0.674, 0.0, 0.674, 1.645)
 ND = statistics.NormalDist()
+
+# --- Refresh calibration (from the one refresh the house documented) ---
+# Exophase refreshed the game's counts between the 04:00Z and 04:30Z reads
+# on 2026-11-19: players tracked 638 -> 3,868, trophies earned 943 -> 4,276.
+# The first probe was at 23:50Z, so the interval between refreshes is about
+# 4.5 h; the snapshot a first read shows is on average half an interval old.
+REFRESH_INTERVAL_MEAN_H = 4.5
+REFRESH_INTERVAL_SD_H = 1.0
+SNAPSHOT_AGE_H = 2.25  # half the interval: expected age at the first read
+# Mean rate factor for the non-100% trophies across that refresh:
+#   (4276 - 3868) / 3868  over  (943 - 638) / 638  =  0.2206.
+UNIFORM_DROP = 0.2206
+# Dilution floor: a trophy no new player earned keeps only its old earners
+# over the new player count, 638 / 3868.
+DILUTION_FLOOR = 638.0 / 3868.0
+# Per-earner-count drop factors (see module docstring): the fitted table,
+# already shrunk halfway in log space toward UNIFORM_DROP.
+DROP_BY_EARNERS = (
+    (0, DILUTION_FLOOR),
+    (4, 0.2032),
+    (5, 0.1925),
+    (6, 0.1936),
+    (7, 0.2403),
+    (8, 0.2353),
+    (10, 0.2457),
+    (13, 0.3573),
+)
+DROP_CAP = 0.60
+# Logit spread of the refreshed branch on a 90-minute horizon; grows like
+# sqrt(horizon) because a longer horizon holds more unmodelled refreshes.
+REFRESH_SPREAD_90MIN = 0.25
 
 
 def parse_time(text):
@@ -127,23 +199,60 @@ def distinct_states(history):
     return states
 
 
+def refresh_probability(staleness_h, horizon_h):
+    """P(a refresh falls in (S, S+H] | no refresh by S), for a refresh
+    interval ~ N(REFRESH_INTERVAL_MEAN_H, REFRESH_INTERVAL_SD_H). S is the
+    time since the page's counts were last set, which the caller measures
+    from the first read plus the snapshot's expected age at that read."""
+    mean = REFRESH_INTERVAL_MEAN_H
+    sd = REFRESH_INTERVAL_SD_H
+    surv = 1.0 - norm_cdf((staleness_h - mean) / sd)
+    if surv <= 1e-12:
+        return 0.98
+    p = (norm_cdf((staleness_h + horizon_h - mean) / sd)
+         - norm_cdf((staleness_h - mean) / sd)) / surv
+    return clamp(p, 0.05, 0.98)
+
+
+def refresh_drop(earners):
+    """Rate factor for a trophy with `earners` holders when a refresh lands:
+    log-linear interpolation over DROP_BY_EARNERS, extrapolated past the
+    last point on its slope and capped. A trophy with no holders yet keeps
+    the dilution floor; one every new player reaches keeps much more."""
+    table = DROP_BY_EARNERS
+    if earners <= table[0][0]:
+        return table[0][1]
+    for (x0, y0), (x1, y1) in zip(table, table[1:]):
+        if earners <= x1:
+            if x1 == x0:
+                return y1
+            w = (earners - x0) / (x1 - x0)
+            return math.exp((1.0 - w) * math.log(y0) + w * math.log(y1))
+    (x0, y0), (x1, y1) = table[-2], table[-1]
+    slope = (math.log(y1) - math.log(y0)) / (x1 - x0)
+    return min(DROP_CAP, math.exp(math.log(y1) + slope * (earners - x1)))
+
+
 def forecast_flat(case, state, checkpoint, horizon_h):
-    """One distinct state: refresh-mixture forecast."""
+    """One distinct state: refresh-mixture forecast.
+
+    The snapshot the first read shows predates that read by about half a
+    refresh interval, so the staleness is the time from the first read to
+    the checkpoint plus SNAPSHOT_AGE_H. The refreshed branch drops each
+    trophy by its earner-count factor (refresh_drop) with lognormal jitter
+    whose logit spread widens with the horizon; the unrefreshed branch
+    keeps the last rates. The 100% trophy stays at 100%.
+    """
     _, first_time, read = state
     last_rates = list(read.get("rates") or [])
     # A short rates list must never drop a trophy from the output: pad it.
     last_rates += [None] * (len(case["trophies"]) - len(last_rates))
+    players_last = read.get("players_tracked") or 0
     staleness = (checkpoint - first_time).total_seconds() / 3600.0
-    # P(refresh in (S, S+H] | no refresh by S), refresh interval ~ N(4.5, 1.0).
-    surv = 1.0 - norm_cdf(staleness - 4.5)
-    if surv <= 1e-12:
-        p_refresh = 0.90
-    else:
-        p_refresh = (norm_cdf(staleness + horizon_h - 4.5)
-                     - norm_cdf(staleness - 4.5)) / surv
-    p_refresh = clamp(p_refresh, 0.05, 0.90)
-    drop = 0.221
-    jitter = 0.20
+    staleness += SNAPSHOT_AGE_H
+    p_refresh = refresh_probability(staleness, horizon_h)
+    spread = REFRESH_SPREAD_90MIN * math.sqrt(max(horizon_h / 1.5, 1.0))
+    spread = min(spread, 0.75)
     rows = []
     for trophy, rate in zip(case["trophies"], last_rates):
         tid = trophy["id"]
@@ -152,11 +261,13 @@ def forecast_flat(case, state, checkpoint, horizon_h):
         if rate >= 100.0:
             rows.append({"id": tid, "q": [100.0] * 5})
             continue
+        earners = int(round(rate * players_last / 100.0)) if players_last else 0
+        drop = refresh_drop(earners)
         qs = []
         for tau in (0.05, 0.25, 0.5, 0.75, 0.95):
             if tau < p_refresh:
                 u = tau / p_refresh
-                qs.append(drop * rate * math.exp(ND.inv_cdf(u) * jitter))
+                qs.append(drop * rate * math.exp(ND.inv_cdf(u) * spread))
             else:
                 qs.append(rate)
         rows.append({"id": tid, "q": finish_quantiles(qs)})
