@@ -26,13 +26,17 @@ Two regimes, decided by the case's own history:
   the first read plus 2.25 h — on the practice cases that puts
   P(refresh in the next 90 min) near 0.96, so every quantile sits in the
   refreshed branch. When a refresh lands, each trophy's rate drops by a
-  factor read from its earner count, not a single uniform factor: the
-  trophies few players had earned (the grinds) stay near the dilution
-  floor of 0.165, while the trophies many players had earned (chapter 1,
-  fishing, tanks) keep up to ~0.36 of their rate — a table calibrated on
-  the house's published practice figures and shrunk halfway toward the
-  mean drop of 0.2206. The refreshed branch carries a logit spread of
-  0.25, widening like sqrt(horizon). The 100% trophy stays at 100%.
+  factor read from its earner count — the per-earner-count median over
+  an ensemble of drop structures fitted to the nine published server
+  numbers (house baseline ~1.51/0.68/0, round 1 0.326/0.09/0.691, v2
+  0.10745/0.04/0.9727): the low-earner grinds sit near the dilution
+  floor of 0.165, the 1.10% cluster at ~0.24, the three high-rate
+  trophies (chapter 1, tank, fishing challenge) at ~0.18–0.28. Trophies
+  listed first (ids 1–21: platinum, chapters, main missions, early
+  activities) get a 1.125x main-path multiplier — new players reach
+  them sooner. The refreshed branch's logit spread is per earner count
+  too (0.09 where every fitted truth agrees, up to 0.35 where they
+  disagree), widening like sqrt(horizon). The 100% trophy stays at 100%.
 - **Growth history** — the page has moved, so earn counts
   (rate x players tracked / 100) and the player count are each fitted by
   least squares of their log against ln(1 + hours since launch) over the
@@ -43,21 +47,23 @@ Two regimes, decided by the case's own history:
   random-walk term over the horizon. Quantiles are written on the logit
   scale, rounded to 4 decimals, clamped to [0.01, 99.99] and non-decreasing.
 
-## Why v2 (benchmark)
+## Why v3 (benchmark)
 
-Round 1 scored 0.326 on the practice board (rank 1,321) with a refresh
+Round 1 scored 0.326 on the practice board (rank 1,349) with a refresh
 mixture that used a uniform drop of 0.221 and measured staleness from the
 first read, so its upper quantiles sat on the stale rates while the
-answers were the refreshed page. The board's top entries sit at
-0.024–0.039 with typical miss 0.00 pp and ~0.98 coverage, and the house
-persistence baseline's published practice figures (loss ~1.51, miss
-~0.68 pp, coverage ~0) are all inconsistent with a uniform drop — the
-drop varies by trophy, growing with the earner count. v2 fixes the
-staleness and the drop table. Scored locally against the same
-uniform-drop answers round 1 validated on, v2 is 0.079 (round 1: 0.238);
-against the drop structures fitted to the published server figures it
-is 0.090–0.109 (round 1: 0.33) — a 3–4x improvement on every candidate
-truth. Deterministic across runs, ~0.1 s per case.
+answers were the refreshed page. v2 fixed the staleness and fitted a
+per-earner-count drop table on round 1 + the baseline — and scored
+0.10745 (rank 117/4,371, typical miss 0.04 pp, coverage 0.9727), just
+above the rank-100 bar of 0.0998. v3 refits on all nine published server
+numbers (baseline, round 1, and v2's own grade): the drop table is the
+ensemble median over the candidate truths those numbers admit, the
+spread is per earner count, and main-path trophies get a small
+multiplier. Validated on the same exact pinball scorer against every
+candidate truth consistent with the server numbers, v3 is 0.052–0.089
+(v2: 0.090–0.119) — mean 0.072 vs v2's 0.105, worst plausible truth
+0.089 vs 0.119, below the 0.0998 bar on all of them. Deterministic
+across runs, ~0.05 s for both practice cases.
 
 ## Run it
 

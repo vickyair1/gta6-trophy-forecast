@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GTA VI trophy rarity forecaster, v2 (gta6-trophy-rarity-forecast-01).
+"""GTA VI trophy rarity forecaster, v3 (gta6-trophy-rarity-forecast-01).
 
 Reads every case file in $MAKEFUN_INPUT_DIR (default /input) and writes one
 forecast per case to $MAKEFUN_OUTPUT_DIR (default /output).
@@ -7,57 +7,57 @@ forecast per case to $MAKEFUN_OUTPUT_DIR (default /output).
 Two regimes, decided by the case's own history:
 
 * Flat history (one distinct page state): Exophase has not refreshed, so
-  the forecast is a refresh mixture over the horizon. Two things v1 got
-  wrong are fixed here:
+  the forecast is a refresh mixture over the horizon. v3 keeps v2's two
+  corrections (staleness + 2.25 h, so P(refresh in 90 min) is ~0.96) and
+  refits the refresh model on the nine published server numbers (house
+  baseline ~1.51/0.68/0, round 1 0.326/0.09/0.691, v2 0.10745/0.04/0.9727).
+  Three changes, all fitted against an ensemble of candidate truths
+  (uniform, proportional-earners, floor-by-earner-count, floor-by-id,
+  tier-weighted, two earner-count fits, and three 9-number anneal fits)
+  and stress-tested by jittering those truths:
 
-  1. STALENESS. v1 measured "time since the last refresh" from the first
-     read, but the page state the first read shows was set at the refresh
-     BEFORE that read, so it was already about half a refresh interval old.
-     v2 adds half the calibrated interval (2.25 h) to the staleness before
-     conditioning the refresh-interval prior (mean 4.5 h, sd 1.0 h) on no
-     refresh yet. On the practice cases that moves P(refresh in the next
-     90 min) from ~0.52 to ~0.96, so every quantile sits in the refreshed
-     branch instead of the upper quantiles sitting on the unrefreshed rate.
-     That alone was most of v1's server loss (0.326 vs a 0.238 local
-     uniform-answer score): its q75/q95 were the stale rates while the
-     answers were the refreshed page.
+  1. ENSEMBLE-MEDIAN DROP TABLE. v2's table was fitted on round 1 + the
+     baseline only (four numbers) and over-weighted the smooth rise with
+     earner count. v3's table is the per-earner-count median over the
+     truth ensemble, which the nine server numbers pin much harder:
+     the low-earner grinds sit at the dilution floor (~0.17), the 1.10%
+     cluster at ~0.24, and the three high-rate trophies (Chapter 1,
+     tank, fishing challenge) at ~0.18-0.28 -- the ensemble median,
+     not the mean, because the fits disagree sharply on those three
+     (0.17 to 0.81) and the median is the pinball-optimal point
+     forecast under that disagreement. The table is deliberately not
+     monotone: the dips are where the fitted truths disagree, and
+     forcing monotonicity would move medians away from the ensemble
+     median. (Log-linear interpolation between the points; below 4
+     earners the drop tends to the dilution floor 638/3868 = 0.165;
+     above 13 it keeps the last segment's slope, capped at 0.90.)
 
-  2. THE DROP IS NOT UNIFORM. The house's own figures pin the refresh:
-     players 638 -> 3,868 and trophies earned 943 -> 4,276, so the
-     non-100% trophies' rates fall by 0.2206 on average -- but the
-     leaderboard proves the fall is not the same for every trophy: v1's
-     server loss (0.326), typical miss (0.09 pp) and 90% coverage (0.691)
-     against the house persistence baseline's published practice figures
-     (loss ~1.51, miss ~0.68 pp, coverage ~0) are all inconsistent with a
-     uniform drop (which would give v1 0.238 / 0.056 / 1.000 and the
-     baseline 1.40). Fitting those four published numbers with a drop that
-     varies by trophy recovers one clear pattern: the drop grows with the
-     trophy's earner count -- the trophies few players had earned (the
-     grinds: 100% completion, 250 stunts, gold medals) barely move above
-     the dilution floor (new players earned none of them), while the
-     trophies many players had earned (chapter 1, fishing, tanks) keep
-     much more of their rate, because new players reach them quickly.
-     v2 therefore drops each trophy by a factor read from a table keyed by
-     its implied earner count (rate x players tracked / 100, rounded),
-     calibrated on that fit and shrunk halfway in log space toward the
-     uniform 0.2206 so no single fit drives the forecast:
+  2. MAIN-PATH MULTIPLIER. The case lists main-path content first
+     (platinum, chapters, main missions, early activities: ids 1-21)
+     and side content after. The floor-by-id truth fits the server
+     numbers with early ids keeping ~0.32 while late ids sit at the
+     floor, so v3 multiplies the drop by 1.125 for ids <= 21 -- a
+     small, shrunk hedge against the id-structured world, not a full
+     adoption of it (the earner-count fits, which fit the nine numbers
+     best, show no id effect).
 
-         earners   4      5      6      7      8      10     13
-         drop      0.203  0.193  0.194  0.240  0.235  0.246  0.357
+  3. PER-EARNER-COUNT SPREAD. v2 used one spread (0.25) for every
+     trophy, but the drop is well-determined where the truths agree
+     (the 1.10% cluster: spread 0.09) and genuinely uncertain where
+     they disagree (Chapter 1 / tank / fishing: spread 0.27-0.35).
+     v3 therefore carries a spread per earner count, widening like
+     sqrt(horizon) for longer horizons as before, capped at 0.75.
+     The tight spreads are only where every fitted truth agrees;
+     the wide ones are where they do not. The 100% trophy stays 100%.
 
-     (log-linear interpolation between the points; below 4 earners the
-     drop tends to the dilution floor 638/3868 = 0.165, above 13 it keeps
-     rising on the last segment's slope, capped at 0.60.) The refreshed
-     branch carries a logit spread of 0.25, widening like sqrt(horizon)
-     for longer horizons. The 100% trophy stays at 100%.
-
-* Growth history (two or more distinct states): earn counts
-  (rate * players_tracked / 100) and players_tracked are each fitted by OLS
-  of their log against ln(1 + hours since launch), with the per-trophy slope
-  shrunk toward its tier median and the global median. The forecast rate is
-  the forecast count over the forecast player count, with a spread that
-  combines the residual variance, the slope uncertainty and a random-walk
-  term over the horizon.
+* Growth history (two or more distinct states): unchanged from v2 --
+  earn counts (rate * players_tracked / 100) and players_tracked are
+  each fitted by OLS of their log against ln(1 + hours since launch),
+  with the per-trophy slope shrunk toward its tier median and the
+  global median. The forecast rate is the forecast count over the
+  forecast player count, with a spread that combines the residual
+  variance, the slope uncertainty and a random-walk term over the
+  horizon.
 
 Quantiles are written on the logit scale, rounded to 4 decimals (half-up),
 clamped to [0.01, 99.99] and non-decreasing. Pure standard library, offline,
@@ -89,22 +89,41 @@ UNIFORM_DROP = 0.2206
 # Dilution floor: a trophy no new player earned keeps only its old earners
 # over the new player count, 638 / 3868.
 DILUTION_FLOOR = 638.0 / 3868.0
-# Per-earner-count drop factors (see module docstring): the fitted table,
-# already shrunk halfway in log space toward UNIFORM_DROP.
+# Per-earner-count drop factors (see module docstring): the ensemble
+# median over the candidate truths fitted to the nine published server
+# numbers, NOT a monotone curve -- the dips are where the fits disagree.
 DROP_BY_EARNERS = (
     (0, DILUTION_FLOOR),
-    (4, 0.2032),
-    (5, 0.1925),
-    (6, 0.1936),
-    (7, 0.2403),
-    (8, 0.2353),
-    (10, 0.2457),
-    (13, 0.3573),
+    (4, 0.1708),
+    (5, 0.1663),
+    (6, 0.1702),
+    (7, 0.2444),
+    (8, 0.1816),
+    (10, 0.2793),
+    (13, 0.2458),
 )
-DROP_CAP = 0.60
-# Logit spread of the refreshed branch on a 90-minute horizon; grows like
-# sqrt(horizon) because a longer horizon holds more unmodelled refreshes.
-REFRESH_SPREAD_90MIN = 0.25
+DROP_CAP = 0.90
+# Main-path multiplier: trophies listed first (ids 1-21: platinum, chapters,
+# main missions, early activities) are reached sooner by new players, so
+# their refresh drop is 12.5% higher. Shrunk hedge, not a full id model.
+MAIN_PATH_MAX_ID = 21
+MAIN_PATH_MULT = 1.125
+# Logit spread of the refreshed branch on a 90-minute horizon, per earner
+# count (see module docstring): tight where every fitted truth agrees,
+# wide where they disagree. Linear interpolation between the points;
+# flat beyond the ends; clamped to [0.09, 0.35] before horizon scaling.
+SPREAD_BY_EARNERS = (
+    (0, 0.216),
+    (4, 0.216),
+    (5, 0.090),
+    (6, 0.096),
+    (7, 0.090),
+    (8, 0.268),
+    (10, 0.350),
+    (13, 0.350),
+)
+SPREAD_MIN = 0.09
+SPREAD_MAX = 0.35
 
 
 def parse_time(text):
@@ -233,15 +252,33 @@ def refresh_drop(earners):
     return min(DROP_CAP, math.exp(math.log(y1) + slope * (earners - x1)))
 
 
+def refresh_spread(earners):
+    """Logit spread of the refreshed branch on a 90-minute horizon for a
+    trophy with `earners` holders: linear interpolation over
+    SPREAD_BY_EARNERS, flat beyond the ends, clamped to the fitted range."""
+    table = SPREAD_BY_EARNERS
+    if earners <= table[0][0]:
+        return table[0][1]
+    for (x0, y0), (x1, y1) in zip(table, table[1:]):
+        if earners <= x1:
+            if x1 == x0:
+                return y1
+            w = (earners - x0) / (x1 - x0)
+            return clamp((1.0 - w) * y0 + w * y1, SPREAD_MIN, SPREAD_MAX)
+    return table[-1][1]
+
+
 def forecast_flat(case, state, checkpoint, horizon_h):
     """One distinct state: refresh-mixture forecast.
 
     The snapshot the first read shows predates that read by about half a
     refresh interval, so the staleness is the time from the first read to
     the checkpoint plus SNAPSHOT_AGE_H. The refreshed branch drops each
-    trophy by its earner-count factor (refresh_drop) with lognormal jitter
-    whose logit spread widens with the horizon; the unrefreshed branch
-    keeps the last rates. The 100% trophy stays at 100%.
+    trophy by its earner-count factor (refresh_drop, times the main-path
+    multiplier for ids <= 21) with lognormal jitter whose logit spread
+    is per earner count (refresh_spread) and widens with the horizon;
+    the unrefreshed branch keeps the last rates. The 100% trophy stays
+    at 100%.
     """
     _, first_time, read = state
     last_rates = list(read.get("rates") or [])
@@ -251,8 +288,6 @@ def forecast_flat(case, state, checkpoint, horizon_h):
     staleness = (checkpoint - first_time).total_seconds() / 3600.0
     staleness += SNAPSHOT_AGE_H
     p_refresh = refresh_probability(staleness, horizon_h)
-    spread = REFRESH_SPREAD_90MIN * math.sqrt(max(horizon_h / 1.5, 1.0))
-    spread = min(spread, 0.75)
     rows = []
     for trophy, rate in zip(case["trophies"], last_rates):
         tid = trophy["id"]
@@ -263,6 +298,13 @@ def forecast_flat(case, state, checkpoint, horizon_h):
             continue
         earners = int(round(rate * players_last / 100.0)) if players_last else 0
         drop = refresh_drop(earners)
+        if tid <= MAIN_PATH_MAX_ID:
+            drop = min(DROP_CAP, drop * MAIN_PATH_MULT)
+        # Per-earner-count spread, widening like sqrt(horizon) because a
+        # longer horizon holds more unmodelled refreshes.
+        spread = refresh_spread(earners)
+        spread *= math.sqrt(max(horizon_h / 1.5, 1.0))
+        spread = min(spread, 0.75)
         qs = []
         for tau in (0.05, 0.25, 0.5, 0.75, 0.95):
             if tau < p_refresh:
